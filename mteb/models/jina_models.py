@@ -14,6 +14,7 @@ from mteb.model_meta import ModelMeta
 from mteb.models.sentence_transformer_wrapper import SentenceTransformerWrapper
 from mteb.requires_package import requires_package
 from mteb.languages import PROGRAMMING_LANGS
+from transformers import AutoModel
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,7 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         model: str,
         revision: str | None = None,
         model_prompts: dict[str, str] | None = None,
+        vector_type: str = "multi_vector",
         **kwargs,
     ) -> None:
         requires_package(
@@ -238,6 +240,10 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         import flash_attn  # noqa: F401
         import transformers  # noqa: F401
 
+        model = AutoModel.from_pretrained(model, trust_remote_code=True)
+        model.eval().to("cuda")
+        model.task = "retrieval"
+        self.vector_type = vector_type
         super().__init__(model, revision, model_prompts, **kwargs)
 
     def encode(
@@ -279,6 +285,131 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
             # sometimes in kwargs can be return_tensors=True
             embeddings = embeddings.cpu().detach().float().numpy()
         return embeddings
+
+    def get_text_embeddings(
+        self,
+        texts: list[str],
+        *,
+        task_name: str | None = None,
+        prompt_type: PromptType | None = None,
+        batch_size: int = 32,
+        convert_to_numpy=False,
+        convert_to_tensor=True,
+        **kwargs: Any,
+    ):
+        with torch.no_grad():
+            return self.model.encode_text(
+                texts=texts,
+                batch_size=batch_size,
+                return_multivector=True,
+                prompt_name="query",
+                task="retrieval",
+                return_numpy=convert_to_numpy,
+                **kwargs,
+            )
+
+    def get_image_embeddings(
+        self,
+        images: list[Image.Image] | DataLoader,
+        *,
+        task_name: str | None = None,
+        prompt_type: PromptType | None = None,
+        batch_size: int = 32,
+        convert_to_numpy=False,
+        convert_to_tensor=True,
+        **kwargs: Any,
+    ):
+        img_list = []
+        for batch in images:
+            img_list.extend(batch)
+        embeddings = self.model.encode_image(
+            images=img_list,
+            batch_size=batch_size,
+            return_multivector=True,
+            task="retrieval",
+            return_numpy=convert_to_numpy,
+            **kwargs,
+        )
+        return embeddings
+
+    def similarity(self, a, b):
+        if self.vector_type == "single_vector":
+            return self.score_single_vector(a, b)
+        elif self.vector_type == "multi_vector":
+            return self.score_multi_vector(a, b)
+        else:
+            raise ValueError(
+                "vector_type must be one of the following: [`single_vector`, `multi_vector`]"
+            )
+
+    @staticmethod
+    def score_single_vector(
+        qs: List[torch.Tensor],
+        ps: List[torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Compute the dot product score for the given single-vector query and passage embeddings.
+        """
+        device = "cuda"
+
+        if len(qs) == 0:
+            raise ValueError("No queries provided")
+        if len(ps) == 0:
+            raise ValueError("No passages provided")
+
+        qs_stacked = torch.stack(qs).to(device)
+        ps_stacked = torch.stack(ps).to(device)
+
+        scores = torch.einsum("bd,cd->bc", qs_stacked, ps_stacked)
+        assert scores.shape[0] == len(
+            qs
+        ), f"Expected {len(qs)} scores, got {scores.shape[0]}"
+
+        scores = scores.to(torch.float32)
+        return scores
+
+    @staticmethod
+    def score_multi_vector(
+        qs: List[torch.Tensor],
+        ps: List[torch.Tensor],
+        batch_size: int = 16,
+    ) -> torch.Tensor:
+        """
+        Compute the MaxSim score (ColBERT-like) for the given multi-vector query and passage embeddings.
+        """
+        device = "cuda"
+
+        if len(qs) == 0:
+            raise ValueError("No queries provided")
+        if len(ps) == 0:
+            raise ValueError("No passages provided")
+
+        scores_list: List[torch.Tensor] = []
+
+        for i in range(0, len(qs), batch_size):
+            scores_batch = []
+            qs_batch = torch.nn.utils.rnn.pad_sequence(
+                qs[i : i + batch_size], batch_first=True, padding_value=0
+            ).to(device)
+            for j in range(0, len(ps), batch_size):
+                ps_batch = torch.nn.utils.rnn.pad_sequence(
+                    ps[j : j + batch_size], batch_first=True, padding_value=0
+                ).to(device)
+                scores_batch.append(
+                    torch.einsum("bnd,csd->bcns", qs_batch, ps_batch)
+                    .max(dim=3)[0]
+                    .sum(dim=2)
+                )
+            scores_batch = torch.cat(scores_batch, dim=1).cpu()
+            scores_list.append(scores_batch)
+
+        scores = torch.cat(scores_list, dim=0)
+        assert scores.shape[0] == len(
+            qs
+        ), f"Expected {len(qs)} scores, got {scores.shape[0]}"
+
+        scores = scores.to(torch.float32)
+        return scores
 
 
 def get_programming_task_override(
@@ -331,6 +462,7 @@ jina_embeddings_v4 = ModelMeta(
     open_weights=True,
     revision="26239889730c735ed7e9a4db9180c8935faf4ba0",
     release_date="2025-06-24",  # official release date
+    modalities=["image", "text"],
     n_parameters=int(3.8 * 1e9),
     memory_usage_mb=7500,
     max_tokens=8194,
