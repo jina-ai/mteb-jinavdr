@@ -243,6 +243,7 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         model = AutoModel.from_pretrained(model, trust_remote_code=True)
         model.eval().to("cuda")
         model.task = "retrieval"
+        self.max_pixels = kwargs.get("max_pixels", 37788800)
         self.vector_type = vector_type
         super().__init__(model, revision, model_prompts, **kwargs)
 
@@ -304,7 +305,7 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
                 return_multivector=True,
                 prompt_name="query",
                 task="retrieval",
-                return_numpy=convert_to_numpy,
+                return_numpy=False,
                 **kwargs,
             )
 
@@ -325,9 +326,10 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         embeddings = self.model.encode_image(
             images=img_list,
             batch_size=batch_size,
+            max_pixels=self.max_pixels,
             return_multivector=True,
             task="retrieval",
-            return_numpy=convert_to_numpy,
+            return_numpy=False,
             **kwargs,
         )
         return embeddings
