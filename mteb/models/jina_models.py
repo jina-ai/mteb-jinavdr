@@ -323,7 +323,7 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         img_list = []
         for batch in images:
             img_list.extend(batch)
-        embeddings = self.model.encode_image(
+        return self.model.encode_image(
             images=img_list,
             batch_size=batch_size,
             max_pixels=self.max_pixels,
@@ -332,7 +332,6 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
             return_numpy=False,
             **kwargs,
         )
-        return embeddings
 
     def similarity(self, a, b):
         if self.vector_type == "single_vector":
@@ -352,7 +351,7 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         """
         Compute the dot product score for the given single-vector query and passage embeddings.
         """
-        device = "cuda"
+        device = "cpu"
 
         if len(qs) == 0:
             raise ValueError("No queries provided")
@@ -379,7 +378,7 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         """
         Compute the MaxSim score (ColBERT-like) for the given multi-vector query and passage embeddings.
         """
-        device = "cuda"
+        device = "cpu"
 
         if len(qs) == 0:
             raise ValueError("No queries provided")
