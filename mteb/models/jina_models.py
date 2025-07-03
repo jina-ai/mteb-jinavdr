@@ -243,7 +243,6 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         model = AutoModel.from_pretrained(model, trust_remote_code=True)
         model.eval().to("cuda")
         model.task = "retrieval"
-        self.max_pixels = kwargs.get("max_pixels", 37788800)
         self.vector_type = vector_type
         super().__init__(model, revision, model_prompts, **kwargs)
 
@@ -315,6 +314,7 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         task_name: str | None = None,
         prompt_type: PromptType | None = None,
         batch_size: int = 32,
+        max_pixels: int = 37788800,
         convert_to_numpy=False,
         convert_to_tensor=True,
         **kwargs: Any,
@@ -325,11 +325,10 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         return self.model.encode_image(
             images=img_list,
             batch_size=batch_size,
-            max_pixels=self.max_pixels,
+            max_pixels=max_pixels,
             return_multivector=True,
             task="retrieval",
             return_numpy=False,
-            **kwargs,
         )
 
     def similarity(self, a, b):
