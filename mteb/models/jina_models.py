@@ -306,7 +306,6 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
                 prompt_name="query",
                 task="retrieval",
                 return_numpy=False,
-                **kwargs,
             )
 
     def get_image_embeddings(
