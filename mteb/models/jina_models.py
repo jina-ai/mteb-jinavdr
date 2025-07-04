@@ -241,10 +241,10 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         import transformers  # noqa: F401
 
         model = AutoModel.from_pretrained(model, trust_remote_code=True)
-        model.eval().to("cuda")
         model.task = "retrieval"
         self.vector_type = vector_type
         super().__init__(model, revision, model_prompts, **kwargs)
+        model.eval().to("cuda")
 
     def encode(
         self,
@@ -313,7 +313,7 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         *,
         task_name: str | None = None,
         prompt_type: PromptType | None = None,
-        batch_size: int = 32,
+        batch_size: int = 2,
         max_pixels: int = 37788800,
         convert_to_numpy=False,
         convert_to_tensor=True,
