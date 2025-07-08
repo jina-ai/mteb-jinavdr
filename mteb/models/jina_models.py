@@ -240,11 +240,11 @@ class JinaV4Wrapper(SentenceTransformerWrapper):
         import flash_attn  # noqa: F401
         import transformers  # noqa: F401
 
-        model = AutoModel.from_pretrained(model, trust_remote_code=True)
+        model = AutoModel.from_pretrained(model, trust_remote_code=True, device_map="cuda")
         model.task = "retrieval"
         self.vector_type = vector_type
         super().__init__(model, revision, model_prompts, **kwargs)
-        model.eval().to("cuda")
+        model.eval()
 
     def encode(
         self,
