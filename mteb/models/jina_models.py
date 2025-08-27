@@ -6,6 +6,7 @@ from functools import partial
 from typing import Any
 
 import numpy as np
+from sympy import ifft
 import torch
 from PIL import Image
 from sentence_transformers import __version__ as st_version
@@ -216,6 +217,89 @@ class JinaWrapper(SentenceTransformerWrapper):
         return embeddings
 
 
+import torch.nn as nn
+import torchvision.models as models
+from torchvision.transforms import transforms
+
+
+class FullyConvolutionalResnet18(models.ResNet):
+    qualities = [150528, 602112, 2408448]
+
+    def __init__(self, num_classes=3, cached_file=None, **kwargs):
+        # Start with standard resnet18 defined here
+        super().__init__(block=models.resnet.BasicBlock, layers=[2, 2, 2, 2], num_classes=num_classes, **kwargs)
+        if cached_file:
+            state_dict = torch.load(cached_file)
+            self.load_state_dict(state_dict)
+
+        # Replace AdaptiveAvgPool2d with standard AvgPool2d
+        self.avgpool = nn.AvgPool2d((7, 7))
+
+        # Convert the original fc layer to a convolutional layer.
+        self.last_conv = torch.nn.Conv2d(in_channels=self.fc.in_features, out_channels=num_classes, kernel_size=1)
+        self.last_conv.weight.data.copy_(self.fc.weight.data.view(*self.fc.weight.data.shape, 1, 1))
+        self.last_conv.bias.data.copy_(self.fc.bias.data)
+        self.to("cuda")
+        self.transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+            ]
+        )
+        self.needed_tokens = 0
+        self.used_tokens = 0
+
+    # Reimplementing forward pass.
+    def _forward_impl(self, x):
+        # Standard forward for resnet18
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+
+        # Notice, there is no forward pass
+        # through the original fully connected layer.
+        # Instead, we forward pass through the last conv layer
+        x = self.last_conv(x)
+        return x
+
+    def get_image_class(self, image: Image.Image) -> int:
+        input_image = self.transform(image).to("cuda")
+        input_image = input_image.unsqueeze(0)
+        output = self(input_image).to("cpu")
+        preds = torch.softmax(output, dim=1)
+        pred, class_idx = torch.max(preds, dim=1)
+        total_patches = class_idx.shape[1] * class_idx.shape[2]
+        counts = [torch.sum(class_idx == i).item() for i in range(3)]
+
+        for i in range(2,0, -1):
+            if counts[i] > total_patches * 0.05:
+                return i
+
+    def get_max_pixels(self, image: Image.Image) -> int:
+        needed_tokens = image.size[0] * image.size[1] /(28*28)
+        self.needed_tokens += needed_tokens
+        try:
+            class_idx = self.get_image_class(image)
+            used_tokens = min(self.qualities[class_idx] /(28*28), needed_tokens)
+            self.used_tokens += used_tokens
+            print(f"Used {self.used_tokens} tokens, needed {self.needed_tokens} tokens, used ratio {self.used_tokens/self.needed_tokens}. For this image: {needed_tokens}, {used_tokens}")
+            return self.qualities[class_idx]
+        except Exception as e:
+            print(f"Error getting max pixels for image: {e}")
+            used_tokens = min(self.qualities[1] /(28*28), needed_tokens)
+            self.used_tokens += used_tokens
+            print(f"Used {self.used_tokens} tokens, needed {self.needed_tokens} tokens, used ratio {self.used_tokens/self.needed_tokens}")
+            return 37788800
+
+
+
+
 class JinaV4Wrapper(Wrapper):
     """following the hf model card documentation."""
 
@@ -251,9 +335,12 @@ class JinaV4Wrapper(Wrapper):
             torch_dtype=torch_dtype,
             attn_implementation=attn_implementation,
             revision=revision,
+            verbosity=0,
         ).eval()
         self.model_prompts = model_prompts or {}
-        self.vector_type = "single_vector"  # default vector type
+        self.max_pixels_model = FullyConvolutionalResnet18(num_classes=3, cached_file="model_epoch_1.pth")
+
+        self.vector_type = "multi_vector"  # default vector type
 
     def _resolve_task_parameters(
         self, task_name: str | None, prompt_type: PromptType | None = None
@@ -353,9 +440,10 @@ class JinaV4Wrapper(Wrapper):
         *,
         task_name: str | None = None,
         prompt_type: PromptType | None = None,
-        batch_size: int = 32,
+        batch_size: int = 1,
         max_pixels: int = 37788800,
         return_numpy=False,
+        predict_resolution= False,
         **kwargs: Any,
     ):
         import torchvision.transforms.functional as F
@@ -383,14 +471,30 @@ class JinaV4Wrapper(Wrapper):
                 all_images.append(pil_img)
 
         batch_size = 1
-        return self.model.encode_image(
-            images=all_images,
-            batch_size=batch_size,
-            max_pixels=max_pixels,
-            return_multivector=self.vector_type == "multi_vector",
-            task=base_task,
-            return_numpy=return_numpy,
-        )
+        if predict_resolution:
+            results = []
+            for image in all_images:
+                max_pixels = self.max_pixels_model.get_max_pixels(image)
+
+                results.extend(self.model.encode_image(
+                    images=[image],
+                    batch_size=batch_size,
+                    max_pixels=max_pixels,
+                    return_multivector=self.vector_type == "multi_vector",
+                    task=base_task,
+                    return_numpy=return_numpy,
+                ))
+            return results
+        else:
+            return self.model.encode_image(
+                    images=all_images,
+                    batch_size=batch_size,
+                    max_pixels=max_pixels,
+                    return_multivector=self.vector_type == "multi_vector",
+                    task=base_task,
+                    return_numpy=return_numpy,
+                )
+
 
     def get_fused_embeddings(
         self,
